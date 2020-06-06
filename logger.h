@@ -5,6 +5,7 @@
 
 namespace Source
 {
+    auto const MAIN = "Main";
     auto const PRODUCER = "Producer";
     auto const ENCODER = "Encoder";
     auto const CLIENT = "Client";
@@ -13,7 +14,10 @@ namespace Source
 
 namespace Logger
 {
-    void log(int mid, const std::string& source, const std::string& message);
+    auto const DEBUG_TASK_ID = -1;
+
+    void log(int pid, int task_id, const std::string &source, const std::string &message);
+    void logd(int pid, const std::string &source, const std::string &message);
     long timestamp();
 }
 
