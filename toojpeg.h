@@ -28,7 +28,7 @@ namespace TooJpeg
   // output       - callback that stores a single byte (writes to disk, memory, ...)
   // pixels       - stored in RGB format or grayscale, stored from upper-left to lower-right
   // width,height - image size
-  // isRGB        - true if RGB format (3 bytes per pixel); false if grayscale (1 byte per pixel)
+  // is_RGB        - true if RGB format (3 bytes per pixel); false if grayscale (1 byte per pixel)
   // quality      - between 1 (worst) and 100 (best)
   // downsample   - if true then YCbCr 4:2:0 format is used (smaller size, minor quality loss) instead of 4:4:4, not relevant for grayscale
   // comment      - optional JPEG comment (0/NULL if no comment), must not contain ASCII code 0xFF

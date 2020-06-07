@@ -14,12 +14,12 @@ namespace Logger
     // timestamp/process_id/task_id/source:.....message.....
     void log(int pid, int task_id, const std::string &source, const std::string &message)
     {
-        std::cout << timestamp() << "/" << pid << "/" << task_id << "/" << source << ": " << message << std::endl;
+        printf("%ld/%05d/%05d/%-8s: %s\n", timestamp(), pid, task_id, source.c_str(), message.c_str());
     }
 
     // NOTE: task_id=-1 is reserved for debug messages
     void logd(int pid, const std::string &source, const std::string &message)
     {
-        std::cout << timestamp() << "/" << pid << "/" << DEBUG_TASK_ID << "/" << source << ": " << message << std::endl;
+        printf("%ld/%05d/%05d/%-8s: %s\n", timestamp(), pid, DEBUG_TASK_ID, source.c_str(), message.c_str());
     }
 }

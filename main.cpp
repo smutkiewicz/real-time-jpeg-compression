@@ -7,11 +7,14 @@
 #include <wait.h>
 #include "toojpeg.h"
 #include "logger.h"
+#include "edf.h"
 
 #define MAX_MSGS 10
+#define VECTOR_SIZE 3072
 #define MAX_MSG_SIZE 8192
 
 // Default params
+int scenario_id = 0;
 int p = 1;
 int width  = 32;
 int height = 32;
@@ -19,7 +22,7 @@ int bytes_per_pixel = 3; // RGB
 int max_interval = 4; // 4x more than predicted speed
 
 // JPEG conversion params
-const bool isRGB = true; // true = RGB image, else false = grayscale
+const bool is_RGB = true; // true = RGB image, else false = grayscale
 const auto quality = 90; // compression quality: 0 = worst, 100 = best, 80 to 90 are most often used
 const bool downsample = false; // false = save as YCbCr444 JPEG (better quality), true = YCbCr420 (smaller file)
 const char* comment = "example image"; // arbitrary JPEG comment
@@ -32,10 +35,7 @@ typedef struct Task {
     int id;
     long timestamp;
     int max_interval;
-    int width;
-    int height;
-    int bytes_per_pixel;
-    unsigned char image[3072];
+    unsigned char image[VECTOR_SIZE];
 } Task;
 
 // Output file
@@ -49,7 +49,7 @@ void output(unsigned char byte)
 
 unsigned char* generateImage()
 {
-    auto image = new unsigned char[3072];
+    auto image = new unsigned char[VECTOR_SIZE];
 
     // create a nice color transition (replace with your code)
     for (auto y = 0; y < height; y++)
@@ -84,50 +84,91 @@ void producer(const std::string& prod_queue_name, struct mq_attr attr)
             pid,
             Logger::timestamp(),
             max_interval,
-            width,
-            height,
-            bytes_per_pixel,
             *pixels
     };
 
     // Send generated data
-    int ret = mq_send(queue, (const char *) &task, sizeof(task), 2);
+    int ret = mq_send(queue, (const char *) &task, MAX_MSG_SIZE, 2);
     Logger::log(pid, task.id, source,
             "Sent msg. Length: " + std::to_string(sizeof(task)) +
-            "Code result: " + std::to_string(ret) + ", " + strerror(errno) + ".");
+            ". Code result: " + std::to_string(ret) + ", " + strerror(errno) + ".");
     mq_close(queue);
 
     delete[] pixels;
 }
 
-void consumer(const std::string& prod_queue_name, const std::string& log_queue_name, struct mq_attr attr)
+void* consumer(void* arg)
+{
+    Task* task = (Task*) arg;
+
+    if (scenario_id == 2)
+    {
+        struct EDF::sched_attr attr{};
+        int x = 0, ret;
+        unsigned int flags = 0;
+
+        printf("deadline thread start %ld\n", gettid());
+
+        attr.size = sizeof(attr);
+        attr.sched_flags = 0;
+        attr.sched_nice = 0;
+        attr.sched_priority = 0;
+
+        /* creates a 10ms/30ms reservation */
+        attr.sched_policy = SCHED_DEADLINE;
+        attr.sched_runtime = 10 * 1000 * 1000;
+        attr.sched_period = 30 * 1000 * 1000;
+        attr.sched_deadline = 30 * 1000 * 1000;
+
+        ret = EDF::sched_setattr(0, &attr, flags);
+        if (ret < 0)
+        {
+            Logger::log(pid, task->id, Source::CLIENT, "Error scheduling EDF task...");
+            exit(-1);
+        }
+    }
+
+    // Prepare to output
+    const auto file_name = "outputs/" + std::to_string(pid) + ".jpg";
+
+    Logger::log(pid, task->id, Source::CLIENT,"Opening file: " + file_name + "...");
+    file.open(file_name, std::ios_base::out | std::ios_base::binary);
+
+    // Perform output action
+    Logger::log(pid, task->id, Source::ENCODER, "Starting conversion to file: " + file_name + "...");
+    auto ok = TooJpeg::writeJpeg(output, task->image, width, height, is_RGB, quality, downsample, comment);
+
+    Logger::log(pid, task->id, Source::ARCHIVER,
+                ok ? "Finished. Saved file as " + file_name : "Error saving file as " + file_name);
+
+    return nullptr;
+}
+
+void client(const std::string& prod_queue_name, struct mq_attr attr)
 {
     // Set global current source for logger
     source = Source::CLIENT;
 
-    // Open producer -> consumer queue
+    // Open producer -> client queue
     auto prod_queue = mq_open(prod_queue_name.c_str(), O_RDONLY | O_CREAT , 0777, &attr);
     Logger::log(pid, Logger::DEBUG_TASK_ID, source,
                 "Opened queue. Id: " + std::to_string(prod_queue) + ", errno: " + strerror(errno));
 
     // Receive task from producer
     Task task;
-    int ret = mq_receive(prod_queue, (char *) &task, MAX_MSG_SIZE, NULL);
-    Logger::logd(pid, source,
-                "Received msg. Code result: " + std::to_string(ret) + ", errno: " + strerror(errno));
+    int ret = 1;
 
-    // Prepare to output
-    const auto file_name = "outputs/" + std::to_string(pid) + ".jpg";
+    do
+    {
+        ret = mq_receive(prod_queue, (char *) &task, MAX_MSG_SIZE, NULL);
+        Logger::logd(pid, source,
+                     "Received msg. Code result: " + std::to_string(ret) + ", errno: " + strerror(errno));
 
-    Logger::log(pid, task.id, source,"Opening file: " + file_name + "...");
-    file.open(file_name, std::ios_base::out | std::ios_base::binary);
+        pthread_t thread;
+        pthread_create(&thread, NULL, consumer, task);
 
-    // Perform output action
-    Logger::log(pid, task.id, Source::ENCODER, "Starting conversion to file: " + file_name + "...");
-    auto ok = TooJpeg::writeJpeg(output, task.image, width, height, isRGB, quality, downsample, comment);
+    } while (ret > 0);
 
-    Logger::log(pid, task.id, Source::ARCHIVER,
-            ok ? "Finished. Saved file as " + file_name : "Error saving file as " + file_name);
     mq_close(prod_queue);
 }
 
@@ -144,14 +185,19 @@ void logger(const std::string& log_queue_name, struct mq_attr attr)
 
 int main(int argc, char * argv[])
 {
+    if (argc > 1) {
+        scenario_id = atoi(argv[1]);
+    }
+
+    std::string prod_queue_name = "/prod_queue/";
+    std::string log_queue_name = "/log_queue/";
+    
     // Adjust params
     width = width * p;
     height = height * p;
     max_interval = max_interval * p;
 
     // Initialize queues params
-    std::string prod_queue_name = "/prod_queue";
-    std::string log_queue_name = "/log_queue";
     struct mq_attr attr{};
     attr.mq_flags = 0;
     attr.mq_msgsize = MAX_MSG_SIZE;
@@ -164,8 +210,8 @@ int main(int argc, char * argv[])
         mq_unlink(prod_queue_name.c_str());
     } else { //child
         pid = fork();
-        if (pid) { //consumer
-            consumer(prod_queue_name, log_queue_name, attr);
+        if (pid) { //client
+            client(prod_queue_name, attr);
             waitpid(pid, nullptr, 0);
             mq_unlink(log_queue_name.c_str());
         } else {
