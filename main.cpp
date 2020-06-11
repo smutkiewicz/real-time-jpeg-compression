@@ -5,6 +5,8 @@
 #include <errno.h>
 #include <cstring>
 #include <wait.h>
+#include <chrono>
+#include <thread>
 #include "toojpeg.h"
 #include "logger.h"
 #include "edf.h"
@@ -12,9 +14,10 @@
 #define MAX_MSGS 10
 #define VECTOR_SIZE 3072
 #define MAX_MSG_SIZE 8192
+#define SAMPLES 10000
 
 // Default params
-int scenario_id = 0;
+int scenario_id = 3;
 int p = 1;
 int width  = 32;
 int height = 32;
@@ -32,8 +35,9 @@ int pid = 0;
 std::string source = Source::MAIN;
 
 typedef struct Task {
-    int id;
-    long timestamp;
+    int process_id;
+    int img_id;
+    std::chrono::time_point<std::chrono::system_clock> send;
     int max_interval;
     unsigned char image[VECTOR_SIZE];
 } Task;
@@ -75,16 +79,24 @@ void producer(const std::string& prod_queue_name, struct mq_attr attr){
     // New data generation
     Task task = {
             pid,
-            Logger::timestamp(),
+            0,
+            std::chrono::system_clock::now(),
             max_interval,
             NULL
     };
-    generateImage(task.image);
-    // Send generated data
-    int ret = mq_send(queue, (const char *) &task, MAX_MSG_SIZE, 2);
-    Logger::log(pid, task.id, source,
-            "Sent msg. Length: " + std::to_string(sizeof(task)) +
-            ". Code result: " + std::to_string(ret) + ", " + strerror(errno) + ".");
+    int ret = 0;
+    int i = 0;
+    for (;i<SAMPLES && ret==0;++i) {
+        generateImage(task.image);
+        task.img_id=i;
+        task.send=std::chrono::system_clock::now();
+        // Send generated data
+        ret = mq_send(queue, (const char *) &task, MAX_MSG_SIZE, 2);
+        Logger::log(pid, task.img_id, source,
+                    "Sent msg. Length: " + std::to_string(sizeof(task)) +
+                    ". Code result: " + std::to_string(ret) + ", " + strerror(errno) + ".");
+    }
+    Logger::logd(pid, source, "Send "+std::to_string(i));
     mq_close(queue);
 
 }
@@ -92,45 +104,18 @@ void producer(const std::string& prod_queue_name, struct mq_attr attr){
 void* consumer(void* arg){
     Task* task = (Task*) arg;
 
-    if (scenario_id == 2)
-    {
-        struct EDF::sched_attr attr{};
-        int x = 0, ret;
-        unsigned int flags = 0;
-
-        printf("deadline thread start %ld\n", gettid());
-
-        attr.size = sizeof(attr);
-        attr.sched_flags = 0;
-        attr.sched_nice = 0;
-        attr.sched_priority = 0;
-
-        /* creates a 10ms/30ms reservation */
-        attr.sched_policy = SCHED_DEADLINE;
-        attr.sched_runtime = 10 * 1000 * 1000;
-        attr.sched_period = 30 * 1000 * 1000;
-        attr.sched_deadline = 30 * 1000 * 1000;
-
-        ret = EDF::sched_setattr(0, &attr, flags);
-        if (ret < 0)
-        {
-            Logger::log(pid, task->id, Source::CLIENT, "Error scheduling EDF task...");
-            exit(-1);
-        }
-    }
-
     // Prepare to output
     const auto file_name = "outputs/" + std::to_string(pid) + ".jpeg";
 
-    Logger::log(pid, task->id, Source::CLIENT,"Opening file: " + file_name + "...");
+    Logger::log(pid, task->img_id, Source::CLIENT, "Opening file: " + file_name + "...");
     file.open(file_name, std::ios_base::out | std::ios_base::binary | std::ios_base::trunc);
-    if(!file.is_open()) Logger::log(pid, task->id, Source::CLIENT,"Opening file  " + file_name + " failed");
+    if(!file.is_open()) Logger::log(pid, task->img_id, Source::CLIENT, "Opening file  " + file_name + " failed");
 
     // Perform output action
-    Logger::log(pid, task->id, Source::ENCODER, "Starting conversion to file: " + file_name + "...");
+    Logger::log(pid, task->img_id, Source::ENCODER, "Starting conversion to file: " + file_name + "...");
     auto ok = TooJpeg::writeJpeg(output, task->image, width, height, is_RGB, quality, downsample, comment);
 
-    Logger::log(pid, task->id, Source::ARCHIVER,
+    Logger::log(pid, task->img_id, Source::ARCHIVER,
                 ok ? "Finished. Saved file as " + file_name : "Error saving file as " + file_name);
     file.close();
     return nullptr;
@@ -149,18 +134,25 @@ void client(const std::string& prod_queue_name, struct mq_attr attr)
     // Receive task from producer
     Task task;
     int ret = 1;
-
-    do
-    {
+    std::chrono::time_point<std::chrono::system_clock> diff;
+    std::ofstream log;
+    std::string log_file_name = "outputs/log_sc";
+    log_file_name+=std::to_string(scenario_id);
+    log_file_name+=".txt";
+    log.open(log_file_name);
+    int i=0;
+    for(; i<SAMPLES && ret>0; ++i){
         ret = mq_receive(prod_queue, (char *) &task, MAX_MSG_SIZE, NULL);
+        std::chrono::duration<double> diff = std::chrono::system_clock::now()-task.send;
+        log<<task.img_id<<" "<<diff.count()<<std::endl;
         Logger::logd(pid, source,
                      "Received msg. Code result: " + std::to_string(ret) + ", errno: " + strerror(errno));
-
-        pthread_t thread;
-        pthread_create(&thread, NULL, consumer, &task);
-
-    } while (ret > 0);
-
+//        pthread_t thread;
+//        pthread_create(&thread, nullptr, consumer, &task);
+        consumer((void*)&task);
+    }
+    log.close();
+    Logger::logd(pid, source, "Received "+std::to_string(i));
     mq_close(prod_queue);
 }
 
@@ -169,6 +161,8 @@ int main(int argc, char * argv[])
     if (argc > 1) {
         scenario_id = atoi(argv[1]);
     }
+    auto cpus_no=std::thread::hardware_concurrency();
+    std::cout<<"Dostępne są "<<cpus_no<<" procesory"<<std::endl;
 
     std::string prod_queue_name = "/prod_queue";
     
@@ -183,12 +177,33 @@ int main(int argc, char * argv[])
     attr.mq_msgsize = MAX_MSG_SIZE;
     attr.mq_maxmsg = MAX_MSGS;
 
+    // Initialize affinity structure
+    cpu_set_t cpu_set;
+    CPU_ZERO(&cpu_set);
+
     pid = fork();
     if (pid) { //producer
+        if (scenario_id) {
+            switch(scenario_id){
+                case 1: CPU_SET(cpus_no-1,&cpu_set);
+                case 2: CPU_SET(cpus_no-2,&cpu_set);
+                case 3: CPU_SET(cpus_no-2,&cpu_set);
+            }
+            sched_setaffinity(0,sizeof(cpu_set_t), &cpu_set);
+        }
         producer(prod_queue_name, attr);
         waitpid(pid, nullptr, 0);
         mq_unlink(prod_queue_name.c_str());
-    } else { //child
+    }
+    else { //child
+        if(scenario_id) {
+            switch(scenario_id){
+                case 1: CPU_SET(cpus_no-1,&cpu_set);
+                case 2: CPU_SET(cpus_no-1,&cpu_set);
+                case 3: CPU_SET(cpus_no-1,&cpu_set);
+            }
+            sched_setaffinity(0,sizeof(cpu_set_t), &cpu_set);
+        }
         client(prod_queue_name, attr);
     }
 
