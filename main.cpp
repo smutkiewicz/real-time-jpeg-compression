@@ -5,14 +5,10 @@
 #include <errno.h>
 #include <cstring>
 #include <wait.h>
-#include <unistd.h>
 #include "toojpeg.h"
 #include "logger.h"
 #include "edf.h"
-
-#define MAX_MSGS 10
-#define VECTOR_SIZE 3072
-#define MAX_MSG_SIZE 8192
+#include "attrs.h"
 
 // Default params
 int scenario_id = 0;
@@ -21,7 +17,7 @@ int height = 32;
 int bytes_per_pixel = 3; // RGB
 
 int sched_runtime = 1; // [ms]
-int sched_period = 2000; // [ms]
+int sched_period = 1000; // [ms]
 int sched_deadline = 4; // [ms] 4x more than predicted speed
 
 // JPEG conversion params
@@ -29,6 +25,9 @@ const bool is_RGB = true; // true = RGB image, else false = grayscale
 const auto quality = 90; // compression quality: 0 = worst, 100 = best, 80 to 90 are most often used
 const bool downsample = false; // false = save as YCbCr444 JPEG (better quality), true = YCbCr420 (smaller file)
 const char* comment = "example image"; // arbitrary JPEG comment
+
+std::string prod_queue_name = "/prod_queue";
+std::string log_queue_name = "/log_queue";
 
 typedef struct Task {
     int id;
@@ -61,7 +60,7 @@ void generateImage(unsigned char image[]) {
     Logger::logd(getpid(), Source::PRODUCER, "New vector generated.");
 }
 
-void producer(const std::string& prod_queue_name, struct mq_attr attr) {
+void producer(struct mq_attr attr) {
 
     int local_task_id = getpid() + 1;
 
@@ -98,7 +97,7 @@ void producer(const std::string& prod_queue_name, struct mq_attr attr) {
             Task task = {
                  local_task_id,
                  Logger::timestamp(),
-                 max_deadline,
+                 sched_deadline,
                  NULL
             };
 
@@ -142,7 +141,7 @@ void* consumer(void* arg) {
     return nullptr;
 }
 
-void client(const std::string& prod_queue_name, struct mq_attr attr) {
+void client(struct mq_attr attr) {
 
     // Receive task from producer
     Task task;
@@ -171,7 +170,8 @@ int main(int argc, char * argv[]) {
 
     if (argc > 1) {
         for (int i = 0; i < argc; i++) {
-            if (argv[i] == "-d") {
+            std::string s(argv[1]);
+            if (s.compare("-d") == 0) {
                 Logger::setDebug(true);
             }
         }
@@ -179,8 +179,6 @@ int main(int argc, char * argv[]) {
 
     if (argc > 2)
         scenario_id = atoi(argv[2]);
-
-    std::string prod_queue_name = "/prod_queue";
 
     // Initialize queues params
     struct mq_attr attr{};
@@ -190,11 +188,18 @@ int main(int argc, char * argv[]) {
 
     int pid = fork();
     if (pid) { //producer
-        producer(prod_queue_name, attr);
+        producer(attr);
         waitpid(pid, nullptr, 0);
         mq_unlink(prod_queue_name.c_str());
     } else { //child
-        client(prod_queue_name, attr);
+        pid = fork();
+        if (pid) { //consumer
+            client(attr);
+            waitpid(pid, nullptr, 0);
+            mq_unlink(log_queue_name.c_str());
+        } else { //logger
+            Logger::logger(log_queue_name);
+        }
     }
 
     Logger::logd(getpid(), Source::MAIN, "Exiting...");

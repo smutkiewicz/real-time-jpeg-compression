@@ -32,12 +32,10 @@
 #define __NR_sched_getattr      381
 #endif
 
-namespace EDF
-{
+namespace EDF {
     static volatile int done;
 
-    struct sched_attr
-    {
+    struct sched_attr {
         __u32 size;
 
         __u32 sched_policy;

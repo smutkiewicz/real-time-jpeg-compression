@@ -3,7 +3,7 @@ project(sczr00)
 
 set(CMAKE_CXX_STANDARD 14)
 
-add_executable(sczr00 main.cpp toojpeg.cpp toojpeg.h logger.h logger.cpp edf.cpp edf.h)
+add_executable(sczr00 main.cpp toojpeg.cpp toojpeg.h logger.h logger.cpp edf.cpp edf.h attrs.cpp attrs.h)
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 target_link_libraries(sczr00 rt Threads::Threads)
