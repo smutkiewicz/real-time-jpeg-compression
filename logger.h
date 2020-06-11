@@ -3,8 +3,7 @@
 #ifndef SCZR00_LOGGER_H
 #define SCZR00_LOGGER_H
 
-namespace Source
-{
+namespace Source {
     auto const MAIN = "Main";
     auto const PRODUCER = "Producer";
     auto const ENCODER = "Encoder";
@@ -12,13 +11,14 @@ namespace Source
     auto const ARCHIVER = "Archiver";
 }
 
-namespace Logger
-{
+namespace Logger {
+
     auto const DEBUG_TASK_ID = -1;
 
     void log(int pid, int task_id, const std::string &source, const std::string &message);
     void logd(int pid, const std::string &source, const std::string &message);
     long timestamp();
+    void setDebug(bool debug);
 }
 
 #endif //SCZR00_LOGGER_H
