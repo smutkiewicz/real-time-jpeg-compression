@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <cstring>
 #include <wait.h>
+#include <unistd.h>
 #include "toojpeg.h"
 #include "logger.h"
 #include "edf.h"
@@ -72,61 +73,68 @@ void producer(const std::string& prod_queue_name, struct mq_attr attr)
 {
     // Global current source for logger
     source = Source::PRODUCER;
+    int local_task_id = pid + 1;
 
     // Open communication queue
     auto queue = mq_open(prod_queue_name.c_str(), O_WRONLY | O_CREAT , 0777, &attr);
     Logger::logd(pid, source,
                 "Opened queue. Id: " + std::to_string(queue) + ", errno: " + strerror(errno));
 
-    // New data generation
-    auto pixels = generateImage();
-    Task task = {
-            pid,
-            Logger::timestamp(),
-            max_interval,
-            *pixels
-    };
+    // Plan cyclic task
+    struct EDF::sched_attr s_attr{};
+    int ret;
 
-    // Send generated data
-    int ret = mq_send(queue, (const char *) &task, MAX_MSG_SIZE, 2);
-    Logger::log(pid, task.id, source,
-            "Sent msg. Length: " + std::to_string(sizeof(task)) +
-            ". Code result: " + std::to_string(ret) + ", " + strerror(errno) + ".");
+    s_attr.size = sizeof(attr);
+    s_attr.sched_flags = 0;
+    s_attr.sched_nice = 0;
+    s_attr.sched_priority = 0;
+
+    /* creates a 10ms/30ms reservation */
+    s_attr.sched_policy = SCHED_DEADLINE;
+    s_attr.sched_runtime = 1 * 1000 * 1000;
+    s_attr.sched_period = 1000 * 1000 * 1000;
+    s_attr.sched_deadline = 5 * 1000 * 1000;
+
+    ret = EDF::sched_setattr(getpid(), &s_attr, 0);
+    if (ret < 0)
+    {
+        Logger::logd(pid, Source::CLIENT, "Error scheduling EDF task...");
+        perror("sched_setattr");
+        exit(-1);
+    }
+    else
+    {
+        for (int i = 0; i < 100; i++) {
+
+            // New data generation
+            auto pixels = generateImage();
+            Task task = {
+                 local_task_id,
+                 Logger::timestamp(),
+                 max_interval,
+                 *pixels
+            };
+
+            // Send generated data (identified by local_task_id)
+            int result = mq_send(queue, (const char *) &task, sizeof(task), 2);
+            Logger::log(pid, task.id, source,
+                        "Sent msg. Length: " + std::to_string(sizeof(task)) +
+                        ". Code result: " + std::to_string(result) + ", " + strerror(errno) + ".");
+
+            // Cleanup state
+            delete[] pixels;
+            local_task_id++;
+
+            sched_yield();
+        }
+    }
+
     mq_close(queue);
-
-    delete[] pixels;
 }
 
 void* consumer(void* arg)
 {
     Task* task = (Task*) arg;
-
-    if (scenario_id == 2)
-    {
-        struct EDF::sched_attr attr{};
-        int x = 0, ret;
-        unsigned int flags = 0;
-
-        printf("deadline thread start %ld\n", gettid());
-
-        attr.size = sizeof(attr);
-        attr.sched_flags = 0;
-        attr.sched_nice = 0;
-        attr.sched_priority = 0;
-
-        /* creates a 10ms/30ms reservation */
-        attr.sched_policy = SCHED_DEADLINE;
-        attr.sched_runtime = 10 * 1000 * 1000;
-        attr.sched_period = 30 * 1000 * 1000;
-        attr.sched_deadline = 30 * 1000 * 1000;
-
-        ret = EDF::sched_setattr(0, &attr, flags);
-        if (ret < 0)
-        {
-            Logger::log(pid, task->id, Source::CLIENT, "Error scheduling EDF task...");
-            exit(-1);
-        }
-    }
 
     // Prepare to output
     const auto file_name = "outputs/" + std::to_string(pid) + ".jpg";
@@ -164,8 +172,14 @@ void client(const std::string& prod_queue_name, struct mq_attr attr)
         Logger::logd(pid, source,
                      "Received msg. Code result: " + std::to_string(ret) + ", errno: " + strerror(errno));
 
-        pthread_t thread;
-        pthread_create(&thread, NULL, consumer, task);
+        task.target_pid = fork(); // child's pid
+        if (task.target_pid) {
+            // parent
+        } else { //child
+            task.target_pid = getpid();
+            pthread_t thread;
+            pthread_create(&thread, NULL, consumer, &task);
+        }
 
     } while (ret > 0);
 
@@ -185,12 +199,10 @@ void logger(const std::string& log_queue_name, struct mq_attr attr)
 
 int main(int argc, char * argv[])
 {
-    if (argc > 1) {
-        scenario_id = atoi(argv[1]);
-    }
+    if (argc > 1) scenario_id = atoi(argv[1]);
 
-    std::string prod_queue_name = "/prod_queue/";
-    std::string log_queue_name = "/log_queue/";
+    std::string prod_queue_name = "/prod_queue";
+    std::string log_queue_name = "/log_queue";
     
     // Adjust params
     width = width * p;
@@ -214,9 +226,6 @@ int main(int argc, char * argv[])
             client(prod_queue_name, attr);
             waitpid(pid, nullptr, 0);
             mq_unlink(log_queue_name.c_str());
-        } else {
-            //logger
-            //logger(log_queue_name, attr);
         }
     }
 
