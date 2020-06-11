@@ -19,7 +19,10 @@ int scenario_id = 0;
 int width  = 32;
 int height = 32;
 int bytes_per_pixel = 3; // RGB
-int max_interval = 4; // 4x more than predicted speed
+
+int sched_runtime = 1; // [ms]
+int sched_period = 2000; // [ms]
+int sched_deadline = 4; // [ms] 4x more than predicted speed
 
 // JPEG conversion params
 const bool is_RGB = true; // true = RGB image, else false = grayscale
@@ -73,9 +76,9 @@ void producer(const std::string& prod_queue_name, struct mq_attr attr) {
 
     /* creates a 10ms/30ms reservation */
     s_attr.sched_policy = SCHED_DEADLINE;
-    s_attr.sched_runtime = 1 * 1000 * 1000;
-    s_attr.sched_period = 2000 * 1000 * 1000;
-    s_attr.sched_deadline = 5 * 1000 * 1000;
+    s_attr.sched_runtime = sched_runtime * 1000 * 1000;
+    s_attr.sched_period = sched_period * 1000 * 1000;
+    s_attr.sched_deadline =  sched_runtime * 1000 * 1000;
 
     ret = EDF::sched_setattr(getpid(), &s_attr, 0);
     if (ret < 0) {
@@ -95,7 +98,7 @@ void producer(const std::string& prod_queue_name, struct mq_attr attr) {
             Task task = {
                  local_task_id,
                  Logger::timestamp(),
-                 max_interval,
+                 max_deadline,
                  NULL
             };
 
@@ -141,16 +144,16 @@ void* consumer(void* arg) {
 
 void client(const std::string& prod_queue_name, struct mq_attr attr) {
 
-    // Open producer -> client queue
-    auto prod_queue = mq_open(prod_queue_name.c_str(), O_RDONLY | O_CREAT , 0777, &attr);
-    Logger::logd(getpid(), Source::CLIENT,
-                "Opened queue. Id: " + std::to_string(prod_queue) + ", errno: " + strerror(errno));
-
     // Receive task from producer
     Task task;
     int ret = 1;
 
     do {
+
+        // Open producer -> client queue
+        auto prod_queue = mq_open(prod_queue_name.c_str(), O_RDONLY | O_CREAT , 0777, &attr);
+        Logger::logd(getpid(), Source::CLIENT,
+                     "Opened queue. Id: " + std::to_string(prod_queue) + ", errno: " + strerror(errno));
 
         ret = mq_receive(prod_queue, (char *) &task, MAX_MSG_SIZE, NULL);
         Logger::logd(getpid(), Source::CLIENT,
@@ -159,9 +162,9 @@ void client(const std::string& prod_queue_name, struct mq_attr attr) {
         pthread_t thread;
         pthread_create(&thread, NULL, consumer, &task);
 
-    } while (ret > 0);
+        mq_close(prod_queue);
 
-    mq_close(prod_queue);
+    } while (ret > 0);
 }
 
 int main(int argc, char * argv[]) {
