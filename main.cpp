@@ -42,14 +42,11 @@ typedef struct Task {
 std::ofstream file;
 
 // Write a single byte compressed by tooJpeg
-void output(unsigned char byte)
-{
+void output(unsigned char byte){
     file << byte;
 }
 
-unsigned char* generateImage()
-{
-    auto image = new unsigned char[VECTOR_SIZE];
+void generateImage(unsigned char image[] ){
 
     // create a nice color transition (replace with your code)
     for (auto y = 0; y < height; y++)
@@ -64,12 +61,9 @@ unsigned char* generateImage()
         }
 
     Logger::logd(pid, Source::PRODUCER, "New vector generated.");
-
-    return image;
 }
 
-void producer(const std::string& prod_queue_name, struct mq_attr attr)
-{
+void producer(const std::string& prod_queue_name, struct mq_attr attr){
     // Global current source for logger
     source = Source::PRODUCER;
 
@@ -79,14 +73,13 @@ void producer(const std::string& prod_queue_name, struct mq_attr attr)
                 "Opened queue. Id: " + std::to_string(queue) + ", errno: " + strerror(errno));
 
     // New data generation
-    auto pixels = generateImage();
     Task task = {
             pid,
             Logger::timestamp(),
             max_interval,
-            *pixels
+            NULL
     };
-
+    generateImage(task.image);
     // Send generated data
     int ret = mq_send(queue, (const char *) &task, MAX_MSG_SIZE, 2);
     Logger::log(pid, task.id, source,
@@ -94,11 +87,9 @@ void producer(const std::string& prod_queue_name, struct mq_attr attr)
             ". Code result: " + std::to_string(ret) + ", " + strerror(errno) + ".");
     mq_close(queue);
 
-    delete[] pixels;
 }
 
-void* consumer(void* arg)
-{
+void* consumer(void* arg){
     Task* task = (Task*) arg;
 
     if (scenario_id == 2)
@@ -129,10 +120,11 @@ void* consumer(void* arg)
     }
 
     // Prepare to output
-    const auto file_name = "outputs/" + std::to_string(pid) + ".jpg";
+    const auto file_name = "outputs/" + std::to_string(pid) + ".jpeg";
 
     Logger::log(pid, task->id, Source::CLIENT,"Opening file: " + file_name + "...");
-    file.open(file_name, std::ios_base::out | std::ios_base::binary);
+    file.open(file_name, std::ios_base::out | std::ios_base::binary | std::ios_base::trunc);
+    if(!file.is_open()) Logger::log(pid, task->id, Source::CLIENT,"Opening file  " + file_name + " failed");
 
     // Perform output action
     Logger::log(pid, task->id, Source::ENCODER, "Starting conversion to file: " + file_name + "...");
@@ -140,7 +132,7 @@ void* consumer(void* arg)
 
     Logger::log(pid, task->id, Source::ARCHIVER,
                 ok ? "Finished. Saved file as " + file_name : "Error saving file as " + file_name);
-
+    file.close();
     return nullptr;
 }
 
@@ -165,22 +157,11 @@ void client(const std::string& prod_queue_name, struct mq_attr attr)
                      "Received msg. Code result: " + std::to_string(ret) + ", errno: " + strerror(errno));
 
         pthread_t thread;
-        pthread_create(&thread, NULL, consumer, task);
+        pthread_create(&thread, NULL, consumer, &task);
 
     } while (ret > 0);
 
     mq_close(prod_queue);
-}
-
-void logger(const std::string& log_queue_name, struct mq_attr attr)
-{
-    char rec[MAX_MSG_SIZE];
-    auto log_queue = mq_open(log_queue_name.c_str(), O_RDONLY | O_CREAT , 0777, &attr);
-    std::cout<<"log open: "<<log_queue<<" "<<strerror(errno)<<std::endl;
-    int ret = mq_receive(log_queue, rec, MAX_MSG_SIZE, NULL);
-    std::cout<<"log rec: "<<ret<<" "<<strerror(errno)<<std::endl;
-    std::cout<<"log: "<<rec<<std::endl;
-    mq_close(log_queue);
 }
 
 int main(int argc, char * argv[])
@@ -189,8 +170,7 @@ int main(int argc, char * argv[])
         scenario_id = atoi(argv[1]);
     }
 
-    std::string prod_queue_name = "/prod_queue/";
-    std::string log_queue_name = "/log_queue/";
+    std::string prod_queue_name = "/prod_queue";
     
     // Adjust params
     width = width * p;
@@ -209,15 +189,7 @@ int main(int argc, char * argv[])
         waitpid(pid, nullptr, 0);
         mq_unlink(prod_queue_name.c_str());
     } else { //child
-        pid = fork();
-        if (pid) { //client
-            client(prod_queue_name, attr);
-            waitpid(pid, nullptr, 0);
-            mq_unlink(log_queue_name.c_str());
-        } else {
-            //logger
-            //logger(log_queue_name, attr);
-        }
+        client(prod_queue_name, attr);
     }
 
     Logger::logd(pid, source, "Exiting...");
