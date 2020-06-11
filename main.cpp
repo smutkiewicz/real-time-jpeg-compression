@@ -17,8 +17,8 @@ int height = 32;
 int bytes_per_pixel = 3; // RGB
 
 int sched_runtime = 1; // [ms]
-int sched_period = 1000; // [ms]
-int sched_deadline = 4; // [ms] 4x more than predicted speed
+int sched_period = 500; // [ms]
+int sched_deadline = 4; // [ms]
 
 // JPEG conversion params
 const bool is_RGB = true; // true = RGB image, else false = grayscale
@@ -86,7 +86,8 @@ void producer(struct mq_attr attr) {
         perror("sched_setattr");
         exit(-1);
     } else {
-        for (int i = 0; i < 10; i++) {
+
+        for (int i = 0; i < 1000; i++) {
 
             // Open communication queue
             auto queue = mq_open(prod_queue_name.c_str(), O_WRONLY | O_CREAT , 0777, &attr);
@@ -106,8 +107,17 @@ void producer(struct mq_attr attr) {
             // Send generated data
             int result = mq_send(queue, (const char *) &task, MAX_MSG_SIZE, 2);
             Logger::log(getpid(), task.id, Source::PRODUCER,
-                        "Sent msg. Length: " + std::to_string(sizeof(task)) +
+                        "Sent vector. Length: " + std::to_string(sizeof(task)) +
                         ". Code result: " + std::to_string(result) + ", " + strerror(errno) + ".");
+
+            /*Logger::Message message = {
+                    getpid(),
+                    task.id,
+                    Source::PRODUCER,
+                    "Sent msg. Length: " + std::to_string(sizeof(task)) +
+                    ". Code result: " + std::to_string(result) + ", " + strerror(errno) + "."
+            };
+            Logger::qlog(message);*/
 
             // Cleanup state
             mq_close(queue);
@@ -124,7 +134,6 @@ void* consumer(void* arg) {
     // Prepare to output
     const auto file_name = "outputs/" + std::to_string(task->id) + ".jpeg";
 
-    Logger::log(getpid(), task->id, Source::CLIENT,"Opening file: " + file_name + "...");
     file.open(file_name, std::ios_base::out | std::ios_base::binary | std::ios_base::trunc);
 
     if(!file.is_open())
