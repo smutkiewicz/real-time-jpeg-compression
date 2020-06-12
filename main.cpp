@@ -11,13 +11,14 @@
 #include "logger.h"
 #include "edf.h"
 
-#define MAX_MSGS 10
+#define MAX_MSGS 1
 #define VECTOR_SIZE 3072
 #define MAX_MSG_SIZE 8192
 #define SAMPLES 10000
 
 // Default params
-int scenario_id = 3;
+int scenario_id = 0;
+char variant = 'c';
 int p = 1;
 int width  = 32;
 int height = 32;
@@ -89,6 +90,7 @@ void producer(const std::string& prod_queue_name, struct mq_attr attr){
     for (;i<SAMPLES && ret==0;++i) {
         generateImage(task.image);
         task.img_id=i;
+        if (variant=='c') std::this_thread::sleep_for(std::chrono::milliseconds(1));
         task.send=std::chrono::system_clock::now();
         // Send generated data
         ret = mq_send(queue, (const char *) &task, MAX_MSG_SIZE, 2);
@@ -127,29 +129,37 @@ void client(const std::string& prod_queue_name, struct mq_attr attr)
     source = Source::CLIENT;
 
     // Open producer -> client queue
-    auto prod_queue = mq_open(prod_queue_name.c_str(), O_RDONLY | O_CREAT , 0777, &attr);
+    auto flag = O_RDONLY|O_CREAT;
+    if(scenario_id==3) flag|=O_NONBLOCK;
+    auto prod_queue = mq_open(prod_queue_name.c_str(), flag , 0777, &attr);
     Logger::log(pid, Logger::DEBUG_TASK_ID, source,
                 "Opened queue. Id: " + std::to_string(prod_queue) + ", errno: " + strerror(errno));
 
     // Receive task from producer
     Task task;
     int ret = 1;
-    std::chrono::time_point<std::chrono::system_clock> diff;
+    std::chrono::duration<double> diff;
     std::ofstream log;
     std::string log_file_name = "outputs/log_sc";
     log_file_name+=std::to_string(scenario_id);
+    log_file_name+=variant;
     log_file_name+=".txt";
     log.open(log_file_name);
     int i=0;
     for(; i<SAMPLES && ret>0; ++i){
+        if (scenario_id==3){
+            do {
+                ret = mq_receive(prod_queue, (char *) &task, MAX_MSG_SIZE, nullptr);
+            } while (ret<=0);
+        } else
         ret = mq_receive(prod_queue, (char *) &task, MAX_MSG_SIZE, NULL);
-        std::chrono::duration<double> diff = std::chrono::system_clock::now()-task.send;
+        diff = std::chrono::system_clock::now()-task.send;
         log<<task.img_id<<" "<<diff.count()<<std::endl;
         Logger::logd(pid, source,
                      "Received msg. Code result: " + std::to_string(ret) + ", errno: " + strerror(errno));
 //        pthread_t thread;
 //        pthread_create(&thread, nullptr, consumer, &task);
-        consumer((void*)&task);
+        if (variant!='b')consumer((void*)&task);
     }
     log.close();
     Logger::logd(pid, source, "Received "+std::to_string(i));
