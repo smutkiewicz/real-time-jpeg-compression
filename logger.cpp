@@ -35,7 +35,7 @@ namespace Logger {
     long timestamp() {
         // Unix timestamp
         const auto p1 = std::chrono::system_clock::now();
-        return std::chrono::duration_cast<std::chrono::seconds>(p1.time_since_epoch()).count();
+        return std::chrono::duration_cast<std::chrono::milliseconds>(p1.time_since_epoch()).count();
     }
 
     // send via communication queue

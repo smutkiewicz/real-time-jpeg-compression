@@ -16,6 +16,8 @@ int width  = 32;
 int height = 32;
 int bytes_per_pixel = 3; // RGB
 
+// Scheduling params
+bool is_edf = false;
 int sched_runtime = 1; // [ms]
 int sched_period = 500; // [ms]
 int sched_deadline = 4; // [ms]
@@ -45,7 +47,6 @@ void output(unsigned char byte) {
 }
 
 void generateImage(unsigned char image[]) {
-
     // create a nice color transition
     for (auto y = 0; y < height; y++)
         for (auto x = 0; x < width; x++) {
@@ -56,43 +57,52 @@ void generateImage(unsigned char image[]) {
             image[offset + 1] = 255 * y / height;
             image[offset + 2] = 127;
         }
-
-    Logger::logd(getpid(), Source::PRODUCER, "New vector generated.");
 }
 
 void producer(struct mq_attr attr) {
 
     int local_task_id = getpid() + 1;
+    int scheduling_result = -1;
 
-    // Plan cyclic task
-    struct EDF::sched_attr s_attr{};
-    int ret;
+    if (is_edf) {
 
-    s_attr.size = sizeof(s_attr);
-    s_attr.sched_flags = 0;
-    s_attr.sched_nice = 0;
-    s_attr.sched_priority = 0;
+        // Plan cyclic task
+        struct EDF::sched_attr s_attr{};
 
-    /* creates a 10ms/30ms reservation */
-    s_attr.sched_policy = SCHED_DEADLINE;
-    s_attr.sched_runtime = sched_runtime * 1000 * 1000;
-    s_attr.sched_period = sched_period * 1000 * 1000;
-    s_attr.sched_deadline =  sched_runtime * 1000 * 1000;
+        s_attr.size = sizeof(s_attr);
+        s_attr.sched_flags = 0;
+        s_attr.sched_nice = 0;
+        s_attr.sched_priority = 0;
 
-    ret = EDF::sched_setattr(getpid(), &s_attr, 0);
-    if (ret < 0) {
+        /* creates a sched_runtime ms/sched_deadline ms reservation */
+        s_attr.sched_policy = SCHED_DEADLINE;
+        s_attr.sched_runtime = sched_runtime * 1000 * 1000;
+        s_attr.sched_period = sched_period * 1000 * 1000;
+        s_attr.sched_deadline = sched_deadline * 1000 * 1000;
+
+        scheduling_result = EDF::sched_setattr(getpid(), &s_attr, 0);
+
+    } else { // is FIFO
+        struct sched_param sp{};
+        sp.sched_priority = sched_get_priority_min(SCHED_RR);
+        scheduling_result = sched_setscheduler(getpid(), SCHED_RR, &sp);
+    }
+
+    if (scheduling_result < 0) {
         std::string e(strerror(errno));
-        Logger::logd(getpid(), Source::CLIENT, "Error scheduling EDF task: " + e + ".");
+        Logger::logd(getpid(), Source::CLIENT, "Error scheduling task: " + e + ".");
         perror("sched_setattr");
         exit(-1);
     } else {
 
-        for (int i = 0; i < 1000; i++) {
+        // Open communication queue
+        auto queue = mq_open(prod_queue_name.c_str(), O_WRONLY | O_CREAT , 0777, &attr);
+        Logger::logd(getpid(), Source::PRODUCER,
+                     "Opened queue. Id: " + std::to_string(queue) + ", errno: " + strerror(errno));
 
-            // Open communication queue
-            auto queue = mq_open(prod_queue_name.c_str(), O_WRONLY | O_CREAT , 0777, &attr);
-            Logger::logd(getpid(), Source::PRODUCER,
-                         "Opened queue. Id: " + std::to_string(queue) + ", errno: " + strerror(errno));
+        for (int i = 0; i < 100; i++) {
+
+            Logger::log(getpid(), local_task_id, Source::PRODUCER, "Started vector generation.");
 
             // New data generation
             Task task = {
@@ -120,10 +130,11 @@ void producer(struct mq_attr attr) {
             Logger::qlog(message);*/
 
             // Cleanup state
-            mq_close(queue);
             local_task_id++;
             sched_yield();
         }
+
+        mq_close(queue);
     }
 }
 
@@ -156,10 +167,11 @@ void client(struct mq_attr attr) {
     Task task;
     int ret = 1;
 
+    // Open producer -> client queue
+    auto prod_queue = mq_open(prod_queue_name.c_str(), O_RDONLY | O_CREAT , 0777, &attr);
+
     do {
 
-        // Open producer -> client queue
-        auto prod_queue = mq_open(prod_queue_name.c_str(), O_RDONLY | O_CREAT , 0777, &attr);
         Logger::logd(getpid(), Source::CLIENT,
                      "Opened queue. Id: " + std::to_string(prod_queue) + ", errno: " + strerror(errno));
 
@@ -170,9 +182,9 @@ void client(struct mq_attr attr) {
         pthread_t thread;
         pthread_create(&thread, NULL, consumer, &task);
 
-        mq_close(prod_queue);
-
     } while (ret > 0);
+
+    mq_close(prod_queue);
 }
 
 int main(int argc, char * argv[]) {
@@ -180,14 +192,13 @@ int main(int argc, char * argv[]) {
     if (argc > 1) {
         for (int i = 0; i < argc; i++) {
             std::string s(argv[1]);
-            if (s.compare("-d") == 0) {
+            if (s == "-d") {
                 Logger::setDebug(true);
+            } else if (s == "-e") {
+                is_edf = true;
             }
         }
     }
-
-    if (argc > 2)
-        scenario_id = atoi(argv[2]);
 
     // Initialize queues params
     struct mq_attr attr{};
