@@ -18,7 +18,6 @@
 
 // Default params
 int scenario_id = 0;
-char variant = 'c';
 int p = 1;
 int width  = 32;
 int height = 32;
@@ -90,7 +89,6 @@ void producer(const std::string& prod_queue_name, struct mq_attr attr){
     for (;i<SAMPLES && ret==0;++i) {
         generateImage(task.image);
         task.img_id=i;
-        if (variant=='c') std::this_thread::sleep_for(std::chrono::milliseconds(1));
         task.send=std::chrono::system_clock::now();
         // Send generated data
         ret = mq_send(queue, (const char *) &task, MAX_MSG_SIZE, 2);
@@ -142,7 +140,6 @@ void client(const std::string& prod_queue_name, struct mq_attr attr)
     std::ofstream log;
     std::string log_file_name = "outputs/log_sc";
     log_file_name+=std::to_string(scenario_id);
-    log_file_name+=variant;
     log_file_name+=".txt";
     log.open(log_file_name);
     int i=0;
@@ -153,13 +150,12 @@ void client(const std::string& prod_queue_name, struct mq_attr attr)
             } while (ret<=0);
         } else
         ret = mq_receive(prod_queue, (char *) &task, MAX_MSG_SIZE, NULL);
-        diff = std::chrono::system_clock::now()-task.send;
+        auto nw = std::chrono::system_clock::now();
+        diff = nw-task.send;
         log<<task.img_id<<" "<<diff.count()<<std::endl;
         Logger::logd(pid, source,
                      "Received msg. Code result: " + std::to_string(ret) + ", errno: " + strerror(errno));
-//        pthread_t thread;
-//        pthread_create(&thread, nullptr, consumer, &task);
-        if (variant!='b')consumer((void*)&task);
+        consumer((void*)&task);
     }
     log.close();
     Logger::logd(pid, source, "Received "+std::to_string(i));
